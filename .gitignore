@@ -1,0 +1,28 @@
+# Secrets and local config
+config.yaml
+cookie.txt
+*.cookie
+.env
+.env.*
+
+# Generated articles, feeds, and download state
+output/
+state.json
+*.state.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/

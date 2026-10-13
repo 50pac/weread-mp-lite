@@ -1,0 +1,26 @@
+# 复制本文件为 config.yaml 后再填写。不要把真实 Cookie 提交到仓库。
+#
+# cookie 留空，或保留「请在这里粘贴」这类占位文案时，按下面顺序读取：
+#   1. 环境变量 WEREAD_COOKIE
+#   2. 与本文件同目录的 cookie.txt
+#   3. 当前工作目录的 cookie.txt
+# 如果这里写成了完整 Cookie（含 wr_vid / wr_skey），则优先使用这里的值。
+
+cookie: "请在这里粘贴 weread.qq.com 的 Cookie"
+
+accounts:
+  - 示例公众号
+  # 已知 bookId 时可以跳过搜索（bookId 形如 MP_WXS_ 加一串数字）：
+  # - name: 另一个公众号
+  #   book_id: MP_WXS_0000000000
+  # 也可以只写 bookId，程序会把它当作该公众号的目录名：
+  # - MP_WXS_0000000000
+
+# 每个公众号最多抓取的近期文章数
+max_articles: 10
+
+# 两次请求之间的等待秒数。请保持礼貌，不要设为 0。
+request_delay: 2
+
+# 相对路径相对于运行命令时的当前目录
+output_dir: output

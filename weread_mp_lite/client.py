@@ -22,11 +22,13 @@ returns the single latest article.
 
 from __future__ import annotations
 
+import base64
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -39,8 +41,10 @@ ARTICLE_PAGE_SIZE = 20
 MAX_PAGES = 50
 
 ENDPOINTS = {
-    # 公众号搜索。scope=2 表示只搜公众号。失效时可改为 /web/search/search。
+    # 公众号搜索。scope=2 表示只搜公众号。实测经常仍只返回图书，需书架兜底。
     "search": "https://weread.qq.com/web/search/global",
+    # 书架同步。已关注的公众号会出现在这里，bookId 形如 MP_WXS_。
+    "shelf": "https://weread.qq.com/web/shelf/sync",
     # 文章列表。查询参数：bookId、offset。
     "articles": "https://weread.qq.com/web/mp/articles",
     # 正文 HTML。查询参数：reviewId。原文页没有 #js_content 时使用。
@@ -148,15 +152,62 @@ class WeReadClient:
         )
 
     def search_account(self, name: str) -> AccountHit:
-        """Resolve an official-account name to an ``MP_WXS_`` book id."""
+        """Resolve an official-account name to an ``MP_WXS_`` book id.
+
+        WeRead's web search often returns only books even with ``scope=2``.
+        This method therefore:
+
+        1. Accepts a raw ``MP_WXS_…`` id, an article URL with ``__biz``, or a bare ``__biz``;
+        2. Tries ``/web/search/global`` (with and without ``scope=2``), keeping only ``MP_WXS_`` hits;
+        3. Falls back to matching the name against ``MP_WXS_`` books already on the shelf.
+        """
         query = name.strip()
         if not query:
             raise AccountNotFoundError("公众号名称为空。")
         if query.startswith("MP_WXS_"):
             return AccountHit(name=query, book_id=query)
 
+        direct = book_id_from_query(query)
+        if direct:
+            label = query if not looks_like_article_query(query) else direct
+            return AccountHit(name=label, book_id=direct)
+
+        hits = self._search_mp_hits(query)
+        if hits:
+            return choose_account(hits, query)
+
+        shelf_hits = self.list_shelf_mp_accounts()
+        if shelf_hits:
+            try:
+                hit = choose_account(shelf_hits, query)
+            except AccountNotFoundError:
+                hit = None
+            if hit is not None:
+                self.notices.append(
+                    f"网页搜索未返回公众号「{query}」，已从书架匹配到 {hit.book_id}。"
+                )
+                return hit
+
+        raise AccountNotFoundError(
+            f"未在微信读书搜索到公众号「{query}」。"
+            "当前搜索接口经常只返回图书标题、不返回公众号。"
+            "请任选其一：①先在微信读书关注该号后再跑（会从书架匹配）；"
+            "②在配置里填写 book_id（形如 MP_WXS_xxx）；"
+            "③填写该公众号任一篇文章链接（地址里带 __biz=…），程序会自动算出 book_id。"
+        )
+
+    def list_shelf_mp_accounts(self) -> list[AccountHit]:
+        """Return ``MP_WXS_`` accounts currently on the WeRead shelf."""
         payload = self._get_json(
-            ENDPOINTS["search"],
+            ENDPOINTS["shelf"],
+            {"userVid": "", "synckey": 0, "lectureSynckey": 0},
+        )
+        return parse_shelf_mp_accounts(payload)
+
+    def _search_mp_hits(self, query: str) -> list[AccountHit]:
+        """Run web search once with scope=2, then once without if needed."""
+        payloads = []
+        for params in (
             {
                 "keyword": query,
                 "maxIdx": 0,
@@ -164,9 +215,18 @@ class WeReadClient:
                 "count": 20,
                 "scope": 2,
             },
-        )
-        hits = parse_mp_accounts(payload)
-        return choose_account(hits, query)
+            {
+                "keyword": query,
+                "maxIdx": 0,
+                "fragmentSize": 120,
+                "count": 20,
+            },
+        ):
+            payloads.append(self._get_json(ENDPOINTS["search"], params))
+            hits = parse_mp_accounts(payloads[-1])
+            if hits:
+                return hits
+        return []
 
     def list_articles(self, book_id: str, account_name: str, limit: int) -> list[Article]:
         """Return up to *limit* recent articles for a 公众号 book id."""
@@ -366,11 +426,112 @@ def parse_mp_accounts(payload: dict[str, Any]) -> list[AccountHit]:
     return hits
 
 
+def parse_shelf_mp_accounts(payload: dict[str, Any]) -> list[AccountHit]:
+    """Pull ``MP_WXS_`` books out of a ``/web/shelf/sync`` payload."""
+    hits: list[AccountHit] = []
+    seen: set[str] = set()
+    books = payload.get("books")
+    if not isinstance(books, list):
+        return hits
+    for item in books:
+        if not isinstance(item, dict):
+            continue
+        book_id = str(item.get("bookId") or item.get("bookid") or "").strip()
+        if not book_id.startswith("MP_WXS_") or book_id in seen:
+            continue
+        title = str(
+            item.get("title") or item.get("name") or item.get("author") or book_id
+        ).strip()
+        seen.add(book_id)
+        hits.append(AccountHit(name=title or book_id, book_id=book_id))
+    return hits
+
+
+def looks_like_article_query(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    return (
+        lowered.startswith("http://")
+        or lowered.startswith("https://")
+        or "__biz=" in lowered
+        or text.startswith("MP_WXS_")
+    )
+
+
+def book_id_from_query(value: str) -> str:
+    """Turn an article URL, ``__biz=…``, or bare biz into ``MP_WXS_<id>``.
+
+    WeChat official-account ``__biz`` is a base64 form of the numeric id.
+    Decoding it yields the digits that follow ``MP_WXS_``.
+    """
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("MP_WXS_"):
+        return text
+    biz = ""
+    if "__biz=" in text or text.lower().startswith("http"):
+        try:
+            parts = urlsplit(text)
+            query = parse_qs(parts.query)
+            values = query.get("__biz") or query.get("biz") or []
+            if values:
+                biz = unquote(str(values[0])).strip()
+        except Exception:
+            biz = ""
+        if not biz:
+            match = re.search(r"(?:__)?biz=([^&\s#]+)", text, flags=re.I)
+            if match:
+                biz = unquote(match.group(1)).strip()
+    else:
+        # Bare biz token (base64-ish, no spaces).
+        if re.fullmatch(r"[A-Za-z0-9+/=_-]{6,}", text) and not text.isdigit():
+            biz = text
+    if not biz:
+        return ""
+    return book_id_from_biz(biz)
+
+
+def book_id_from_biz(biz: str) -> str:
+    """Decode a WeChat ``__biz`` value into ``MP_WXS_<digits>``."""
+    raw = (biz or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("MP_WXS_"):
+        return raw
+    # URL-safe base64 sometimes uses -/_ ; normalize.
+    padded = raw.replace("-", "+").replace("_", "/")
+    pad_len = (-len(padded)) % 4
+    padded = padded + ("=" * pad_len)
+    try:
+        decoded = base64.b64decode(padded)
+    except Exception:
+        return ""
+    digits = ""
+    try:
+        as_text = decoded.decode("utf-8")
+        if as_text.isdigit():
+            digits = as_text
+    except UnicodeDecodeError:
+        as_text = ""
+    if not digits:
+        # Some clients pack the id as little-endian bytes; fall back to int.
+        try:
+            digits = str(int.from_bytes(decoded, "little"))
+        except Exception:
+            return ""
+    if not digits.isdigit():
+        return ""
+    return f"MP_WXS_{digits}"
+
+
 def choose_account(hits: list[AccountHit], query: str) -> AccountHit:
     needle = query.strip()
     if not hits:
         raise AccountNotFoundError(
-            f"未在微信读书搜索到公众号「{needle}」。"
+            f"未匹配到公众号「{needle}」。"
             "请确认名称是否与微信读书中显示的一致，或在配置里直接填写 book_id（形如 MP_WXS_xxx）。"
         )
     exact = [hit for hit in hits if hit.name.strip() == needle]

@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from weread_mp_lite.client import book_id_from_query, looks_like_article_query
+
 COOKIE_ENV = "WEREAD_COOKIE"
 # 配置示例里的说明文字。命中时视为还没填写，继续读环境变量和 cookie.txt。
 _PLACEHOLDER_MARKERS = (
@@ -184,12 +186,33 @@ def _parse_account(item: Any, index: int) -> AccountConfig:
             raise ConfigError(f"accounts 第 {index} 项是空字符串。")
         if name.startswith("MP_WXS_"):
             return AccountConfig(name=name, book_id=name)
+        if looks_like_article_query(name):
+            book_id = book_id_from_query(name)
+            if not book_id:
+                raise ConfigError(
+                    f"accounts 第 {index} 项看起来像文章链接，但未能解析出 __biz。"
+                )
+            return AccountConfig(name=book_id, book_id=book_id)
         return AccountConfig(name=name)
     if isinstance(item, dict):
         name = str(item.get("name") or "").strip()
         book_id = str(item.get("book_id") or item.get("bookId") or "").strip()
+        url = str(
+            item.get("url")
+            or item.get("article_url")
+            or item.get("articleUrl")
+            or ""
+        ).strip()
+        if not book_id and url:
+            book_id = book_id_from_query(url)
+            if not book_id:
+                raise ConfigError(
+                    f"accounts 第 {index} 项的文章链接未能解析出 __biz：{url}"
+                )
         if not name and book_id:
             name = book_id
+        if not name and url:
+            name = book_id or url
         if not name:
             raise ConfigError(f"accounts 第 {index} 项缺少 name。")
         if book_id and not book_id.startswith("MP_WXS_"):

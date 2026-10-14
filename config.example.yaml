@@ -13,6 +13,10 @@ accounts:
   # 已知 bookId 时可以跳过搜索（bookId 形如 MP_WXS_ 加一串数字）：
   # - name: 另一个公众号
   #   book_id: MP_WXS_0000000000
+  # 网页搜索经常只返回图书：可先在微信读书关注该号（会从书架匹配），
+  # 或填任一篇文章链接（带 __biz），程序会算出 book_id：
+  # - name: 北大国发院本硕博
+  #   url: https://mp.weixin.qq.com/s?__biz=....
   # 也可以只写 bookId，程序会把它当作该公众号的目录名：
   # - MP_WXS_0000000000
 

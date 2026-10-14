@@ -16,8 +16,12 @@ from weread_mp_lite.client import (
     CookieExpiredError,
     WeReadAPIError,
     WeReadClient,
+    AccountHit,
+    book_id_from_biz,
+    book_id_from_query,
     build_mp_url,
     extract_article_html,
+    parse_shelf_mp_accounts,
 )
 
 COOKIE = "wr_vid=100; wr_skey=abc"
@@ -44,6 +48,7 @@ def _client(**kwargs) -> WeReadClient:
 
 def test_endpoints_are_weread_web_paths() -> None:
     assert ENDPOINTS["search"] == "https://weread.qq.com/web/search/global"
+    assert ENDPOINTS["shelf"] == "https://weread.qq.com/web/shelf/sync"
     assert ENDPOINTS["articles"] == "https://weread.qq.com/web/mp/articles"
     assert ENDPOINTS["content"] == "https://weread.qq.com/web/mp/content"
     assert ENDPOINTS["cover"].endswith("/api/mp/cover")
@@ -110,11 +115,69 @@ def test_search_grouped_results() -> None:
 
 def test_search_not_found() -> None:
     client = _client()
-    client.session.get = lambda url, params=None, timeout=None, headers=None: DummyResponse(
-        200, {"books": [{"bookInfo": {"bookId": "1", "title": "三体"}}]}
-    )
-    with pytest.raises(AccountNotFoundError, match="未在微信读书搜索到"):
+    calls = []
+
+    def fake_get(url, params=None, timeout=None, headers=None):
+        calls.append(url)
+        if url == ENDPOINTS["shelf"]:
+            return DummyResponse(200, {"books": []})
+        return DummyResponse(200, {"books": [{"bookInfo": {"bookId": "1", "title": "三体"}}]})
+
+    client.session.get = fake_get
+    with pytest.raises(AccountNotFoundError, match="只返回图书"):
         client.search_account("不存在的号")
+    assert ENDPOINTS["search"] in calls
+    assert ENDPOINTS["shelf"] in calls
+
+
+def test_search_falls_back_to_shelf() -> None:
+    client = _client()
+
+    def fake_get(url, params=None, timeout=None, headers=None):
+        if url == ENDPOINTS["search"]:
+            return DummyResponse(
+                200, {"books": [{"bookInfo": {"bookId": "695233", "title": "三体"}}]}
+            )
+        if url == ENDPOINTS["shelf"]:
+            return DummyResponse(
+                200,
+                {
+                    "books": [
+                        {"bookId": "MP_WXS_2398150000", "title": "机器之心", "author": "机器之心"},
+                        {"bookId": "123", "title": "普通书"},
+                    ]
+                },
+            )
+        raise AssertionError(url)
+
+    client.session.get = fake_get
+    hit = client.search_account("机器之心")
+    assert hit.book_id == "MP_WXS_2398150000"
+    assert any("书架" in note for note in client.notices)
+
+
+def test_book_id_from_biz_and_url() -> None:
+    # __biz is base64 of the ASCII digits.
+    import base64
+
+    digits = "3883148643"
+    biz = base64.b64encode(digits.encode("utf-8")).decode("ascii").rstrip("=")
+    assert book_id_from_biz(biz) == "MP_WXS_3883148643"
+    url = f"https://mp.weixin.qq.com/s?__biz={biz}&mid=1&idx=1&sn=abc"
+    assert book_id_from_query(url) == "MP_WXS_3883148643"
+
+
+def test_parse_shelf_mp_accounts() -> None:
+    hits = parse_shelf_mp_accounts(
+        {
+            "books": [
+                {"bookId": "MP_WXS_1", "title": "甲"},
+                {"bookId": "99", "title": "书"},
+                {"bookId": "MP_WXS_1", "title": "重复"},
+            ]
+        }
+    )
+    assert hits == [AccountHit(name="甲", book_id="MP_WXS_1")]
 
 
 def test_search_ambiguous() -> None:

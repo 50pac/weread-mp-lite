@@ -4,7 +4,7 @@
 
 填写一份 Cookie 和一份公众号名称列表，然后运行一条命令即可。程序会：
 
-1. 用微信读书网页搜索把公众号名称解析成 `MP_WXS_…` 形式的 bookId；
+1. 把公众号名称解析成 `MP_WXS_…` 形式的 bookId（先搜网页；若搜索只返回图书，再从书架匹配；也可直接填 `book_id` 或带 `__biz` 的文章链接）；
 2. 调用 `/web/mp/articles?bookId=…&offset=…` 列出近期文章；
 3. 打开文章原文链接抓取正文 HTML（原文页没有正文时，改用 `/web/mp/content?reviewId=…`）；
 4. 写成带 front matter 的 Markdown，并生成每个公众号一份 RSS，外加一份汇总 RSS。
